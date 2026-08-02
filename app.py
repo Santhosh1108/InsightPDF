@@ -41,12 +41,7 @@ with st.sidebar:
         "Upload PDF(s)", type=["pdf"], accept_multiple_files=True
     )
 
-    api_key = st.text_input(
-        "Groq API key",
-        value=os.environ.get("GROQ_API_KEY", ""),
-        type="password",
-        help="Falls back to the GROQ_API_KEY environment variable if left blank.",
-    )
+    
 
     with st.expander("⚙️ Advanced settings"):
         chunk_size = st.slider("Chunk size (characters)", 300, 2000, 1000, step=100)
@@ -161,7 +156,6 @@ if st.session_state.vector_store:
                         question,
                         model=model,
                         temperature=temperature,
-                        api_key=api_key or None,
                         history=history,
                     ):
                         answer += token
