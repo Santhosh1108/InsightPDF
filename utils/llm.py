@@ -16,13 +16,14 @@ SYSTEM_PROMPT = (
 )
 
 
-def _get_client(api_key: Optional[str] = None) -> Groq:
+def _get_client(api_key=None):
     key = api_key or os.environ.get("GROQ_API_KEY")
+
     if not key:
         raise RuntimeError(
-            "GROQ_API_KEY is not set. Add it in the sidebar or as an "
-            "environment variable."
+            "GROQ_API_KEY is not set."
         )
+
     return Groq(api_key=key)
 
 
