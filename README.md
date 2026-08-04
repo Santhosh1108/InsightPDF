@@ -8,7 +8,8 @@ Instead of sending an entire document to an LLM, the application retrieves only 
 
 ## Demo
 
-> Add screenshots or a GIF here.
+<img width="1905" height="926" alt="image" src="https://github.com/user-attachments/assets/facc2520-794d-4d44-9bd7-3ef1be79df17" />
+
 
 ```
 assets/
