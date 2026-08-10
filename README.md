@@ -1,4 +1,4 @@
-# 📄 AI Support Agent
+# AI Support Agent
 
 A Retrieval-Augmented Generation (RAG) application that lets users chat with one or more PDF documents using semantic search.
 
