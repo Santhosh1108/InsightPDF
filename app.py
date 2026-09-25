@@ -10,7 +10,6 @@ from utils.llm import stream_answer, DEFAULT_MODEL
 
 st.set_page_config(page_title="AI Support Agent", page_icon="🤖", layout="wide")
 
-# ---------- Session state ----------
 defaults = {
     "messages": [],
     "vector_store": None,
@@ -21,11 +20,10 @@ for key, value in defaults.items():
     st.session_state.setdefault(key, value)
 
 
-def files_hash(files) -> str:
-    """Fingerprint the uploaded set so we only rebuild the index when the
-    files actually change, instead of on every single chat message.
-    """
+def files_hash(files, settings) -> str:
+    """Fingerprint documents + retrieval settings so stale indexes are never reused."""
     h = hashlib.sha256()
+    h.update(repr(sorted(settings.items())).encode("utf-8"))
     for f in files:
         f.seek(0)
         h.update(f.read())
@@ -33,7 +31,6 @@ def files_hash(files) -> str:
     return h.hexdigest()
 
 
-# ---------- Sidebar ----------
 with st.sidebar:
     st.header("📄 AI Support Agent")
 
@@ -41,12 +38,23 @@ with st.sidebar:
         "Upload PDF(s)", type=["pdf"], accept_multiple_files=True
     )
 
-    
-
-    with st.expander("⚙️ Advanced settings"):
-        chunk_size = st.slider("Chunk size (characters)", 300, 2000, 1000, step=100)
-        chunk_overlap = st.slider("Chunk overlap", 0, 400, 150, step=50)
-        top_k = st.slider("Chunks to retrieve (k)", 1, 10, 5)
+    with st.expander("⚙️ Advanced RAG settings", expanded=True):
+        chunk_size = st.slider("Chunk size (characters)", 400, 1800, 900, step=100)
+        chunk_overlap = st.slider("Chunk overlap", 0, 300, 120, step=20)
+        top_k = st.slider("Final chunks", 1, 8, 5)
+        candidate_k = st.slider("Candidate pool", 10, 60, 30, step=5)
+        use_reranker = st.checkbox(
+            "Cross-encoder reranking", value=True,
+            help="Runs a second relevance model over hybrid retrieval candidates."
+        )
+        mmr_lambda = st.slider(
+            "Diversity / relevance", 0.50, 0.95, 0.72, step=0.01,
+            help="Higher values prioritize relevance; lower values diversify the final context."
+        )
+        min_rerank_score = st.slider(
+            "Minimum reranker score", -3.0, 2.0, -1.5, step=0.1,
+            help="Raises the relevance gate when you want fewer, stricter sources."
+        )
         temperature = st.slider("Response creativity", 0.0, 1.0, 0.2, step=0.1)
         model = st.selectbox(
             "Model",
@@ -78,19 +86,37 @@ with st.sidebar:
         )
 
     st.markdown("---")
-    st.subheader("Tech Stack")
-    st.markdown("- Streamlit\n- FAISS\n- Sentence Transformers\n- Groq\n- Llama 3")
+    st.subheader("Advanced RAG pipeline")
+    st.markdown(
+        "- Dense FAISS retrieval\n"
+        "- BM25 keyword retrieval\n"
+        "- Reciprocal Rank Fusion\n"
+        "- Cross-encoder reranking\n"
+        "- Duplicate filtering + MMR\n"
+        "- Grounded source/page citations"
+    )
 
 st.title("🤖 AI Support Agent")
+st.caption("Multi-stage hybrid RAG: retrieve → fuse → rerank → diversify → generate")
 
-# ---------- Indexing (only rebuilds when files actually change) ----------
+settings = {
+    "chunk_size": chunk_size,
+    "chunk_overlap": chunk_overlap,
+    "top_k": top_k,
+    "candidate_k": candidate_k,
+    "use_reranker": use_reranker,
+    "mmr_lambda": mmr_lambda,
+    "min_rerank_score": min_rerank_score,
+}
+
 if uploaded_files:
-    current_hash = files_hash(uploaded_files)
+    current_hash = files_hash(uploaded_files, settings)
 
     if current_hash != st.session_state.indexed_hash:
         try:
             all_chunks = []
-            progress = st.progress(0.0, text="Reading PDFs…")
+            progress = st.progress(0.0, text="Reading and cleaning PDFs…")
+
             for i, file in enumerate(uploaded_files):
                 pages = extract_pages_from_pdf(file)
                 chunks = split_pages(
@@ -100,9 +126,12 @@ if uploaded_files:
                     source=file.name,
                 )
                 all_chunks.extend(chunks)
-                progress.progress((i + 1) / len(uploaded_files), text=f"Processed {file.name}")
+                progress.progress(
+                    (i + 1) / len(uploaded_files),
+                    text=f"Processed {file.name}",
+                )
 
-            progress.progress(1.0, text="Building search index…")
+            progress.progress(1.0, text="Building hybrid retrieval indexes…")
             store = VectorStore()
             store.create_index(all_chunks)
 
@@ -110,19 +139,21 @@ if uploaded_files:
             st.session_state.indexed_hash = current_hash
             st.session_state.indexed_files = [f.name for f in uploaded_files]
             progress.empty()
-            st.toast(f"Indexed {len(all_chunks)} chunks from {len(uploaded_files)} file(s) ✅")
+            st.toast(
+                f"Indexed {len(all_chunks)} chunks from {len(uploaded_files)} file(s) with hybrid RAG ✅"
+            )
         except Exception as e:
             st.error(f"Couldn't process your PDF(s): {e}")
             st.stop()
     else:
-        st.caption(f"✅ Using cached index for: {', '.join(st.session_state.indexed_files)}")
+        st.caption(
+            f"✅ Cached index: {', '.join(st.session_state.indexed_files)}"
+        )
 
-# ---------- Chat history ----------
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# ---------- Chat input ----------
 if st.session_state.vector_store:
     question = st.chat_input("Ask anything about your PDF(s)...")
 
@@ -132,22 +163,38 @@ if st.session_state.vector_store:
             st.markdown(question)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching your document…"):
+            with st.spinner("Running advanced retrieval…"):
                 try:
-                    results = st.session_state.vector_store.search(question, k=top_k)
+                    results = st.session_state.vector_store.search(
+                        question,
+                        k=top_k,
+                        candidate_k=candidate_k,
+                        rerank=use_reranker,
+                        mmr_lambda=mmr_lambda,
+                        min_rerank_score=min_rerank_score,
+                    )
                 except Exception as e:
                     st.error(f"Search failed: {e}")
                     st.stop()
 
             if not results:
-                answer = "I couldn't find anything relevant to that in the document."
+                answer = "I couldn't find sufficiently relevant information in the uploaded document(s)."
                 st.markdown(answer)
             else:
-                context = "\n\n".join(r.text for r in results)
+                context_parts = []
+                for i, r in enumerate(results, start=1):
+                    source = r.source or "document"
+                    page = f", page {r.page_number}" if r.page_number else ""
+                    context_parts.append(
+                        f"[SOURCE {i} | {source}{page}]\n{r.text}"
+                    )
+                context = "\n\n".join(context_parts)
+
                 history = [
                     {"role": m["role"], "content": m["content"]}
                     for m in st.session_state.messages[:-1]
                 ]
+
                 placeholder = st.empty()
                 answer = ""
                 try:
@@ -165,12 +212,21 @@ if st.session_state.vector_store:
                     answer = f"⚠️ Something went wrong: {e}"
                     placeholder.markdown(answer)
 
-                with st.expander("📄 Sources Used"):
+                with st.expander("📄 Retrieval Trace"):
+                    st.caption(
+                        f"Hybrid candidates: up to {candidate_k} · Final context: {len(results)} chunks"
+                    )
                     for i, r in enumerate(results, start=1):
                         page_info = f" — page {r.page_number}" if r.page_number else ""
                         source_info = f" ({r.source})" if r.source else ""
+                        rerank_info = (
+                            f" · reranker {r.rerank_score:.2f}"
+                            if r.rerank_score is not None
+                            else ""
+                        )
                         st.markdown(
-                            f"**Source {i}{source_info}{page_info}** · relevance {r.score:.2f}"
+                            f"**Source {i}{source_info}{page_info}** · "
+                            f"retrieval {r.retrieval_score:.3f}{rerank_info}"
                         )
                         st.write(r.text)
                         st.divider()

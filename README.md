@@ -1,207 +1,167 @@
-# AI Support Agent
+# InsightPDF — Advanced Hybrid RAG
 
-A Retrieval-Augmented Generation (RAG) application that lets users chat with one or more PDF documents using semantic search.
+InsightPDF is a PDF question-answering application that now uses a **multi-stage RAG pipeline** instead of sending the first vector-search results directly to the LLM.
 
-Instead of sending an entire document to an LLM, the application retrieves only the most relevant sections using vector embeddings and FAISS, then uses a Groq-hosted Llama model to generate grounded responses with source citations.
+The retrieval layer is designed to reduce noisy context before generation:
 
----
+**PDF → clean/chunk → dense retrieval + BM25 → Reciprocal Rank Fusion → cross-encoder reranking → duplicate filtering → MMR diversification → grounded LLM response**
 
-## Demo
+## What changed
 
-<img width="1905" height="926" alt="image" src="https://github.com/user-attachments/assets/facc2520-794d-4d44-9bd7-3ef1be79df17" />
+### 1. Hybrid retrieval
+Semantic FAISS search is combined with BM25 lexical search. This makes the system better at both conceptual questions and exact terms such as product names, IDs, dates, section titles and technical phrases.
 
+### 2. Reciprocal Rank Fusion
+Dense and sparse rankings are fused without assuming their raw score scales are comparable.
 
-```
-assets/
-├── home.png
-├── chat.png
-└── sources.png
-```
+### 3. Cross-encoder reranking
+The top hybrid candidates are scored jointly against the query using:
 
----
+`cross-encoder/ms-marco-MiniLM-L-6-v2`
 
-## Features
+This is intentionally applied only to a bounded candidate pool rather than the whole document, keeping latency manageable.
 
-- Upload one or multiple PDF documents
-- Semantic search using Sentence Transformers
-- FAISS vector database for fast retrieval
-- Groq + Llama 3 for answer generation
-- Streaming responses
-- Page-level source citations
-- Recursive sentence-aware chunking
-- Configurable retrieval settings
-- Cached vector index for faster conversations
-- Download chat history
-- Reset index without restarting the application
+### 4. Duplicate suppression
+Highly similar chunks are removed before generation so the context budget is not wasted repeating the same passage.
 
----
+### 5. MMR diversification
+Maximal Marginal Relevance selects the final context to balance relevance with coverage across different parts of the document.
+
+### 6. Grounded generation
+Every retrieved passage is passed to the LLM with a source/document and page label. The generation prompt explicitly treats document text as evidence and rejects instructions embedded inside retrieved content.
+
+### 7. Correct cache invalidation
+The index fingerprint now includes retrieval settings, so changing chunk size, overlap or retrieval configuration cannot accidentally reuse a stale index.
 
 ## Architecture
 
 ```
-
-                PDF Documents
-                      │
-                      ▼
-             PDF Text Extraction
-                      │
-                      ▼
-          Recursive Text Chunking
-                      │
-                      ▼
-      Sentence Transformer Embeddings
-                      │
-                      ▼
-                 FAISS Index
-                      │
-              User Question
-                      │
-                      ▼
-            Semantic Retrieval
-                      │
-                      ▼
-             Groq Llama 3 Model
-                      │
-                      ▼
-      Streaming Response + Citations
-
+                         PDF(s)
+                           │
+                           ▼
+                 Text extraction + cleaning
+                           │
+                           ▼
+                 Semantic-aware chunking
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+        Sentence embeddings           BM25
+              │                         │
+              ▼                         ▼
+          FAISS top-N                BM25 top-N
+              └────────────┬────────────┘
+                           ▼
+                   Reciprocal Rank
+                      Fusion (RRF)
+                           │
+                           ▼
+                  Candidate filtering
+                           │
+                           ▼
+                 Cross-encoder reranker
+                           │
+                           ▼
+              Duplicate suppression
+                           │
+                           ▼
+                  MMR diversification
+                           │
+                           ▼
+                 Final evidence set
+                           │
+                           ▼
+                  Groq Llama model
+                           │
+                           ▼
+                Grounded answer + sources
 ```
 
----
+## Tech stack
 
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Frontend | Streamlit |
-| Embeddings | Sentence Transformers |
-| Vector Search | FAISS |
-| LLM | Groq (Llama 3.3) |
-| PDF Processing | PyMuPDF / pypdf |
+| Layer | Technology |
+|---|---|
+| UI | Streamlit |
+| PDF parsing | PyMuPDF / pypdf |
+| Chunking | Custom recursive sentence-aware splitter |
+| Dense retrieval | Sentence Transformers + FAISS |
+| Sparse retrieval | BM25 |
+| Rank fusion | Reciprocal Rank Fusion |
+| Reranking | Sentence Transformers CrossEncoder |
+| Diversity | MMR |
+| Generation | Groq + Llama |
 | Language | Python |
 
----
-
-## Installation
-
-Clone the repository
+## Run locally
 
 ```bash
-git clone https://github.com/yourusername/ai-support-agent.git
-
-cd ai-support-agent
-```
-
-Create a virtual environment
-
-```bash
+git clone https://github.com/Santhosh1108/InsightPDF.git
+cd InsightPDF
 python -m venv venv
 ```
 
-Activate it
-
-Windows
+Windows:
 
 ```bash
 venv\Scripts\activate
 ```
 
-macOS/Linux
+macOS/Linux:
 
 ```bash
 source venv/bin/activate
 ```
 
-Install dependencies
+Install:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file
+Create `.env`:
 
 ```env
 GROQ_API_KEY=your_api_key_here
 ```
 
-Run the application
+Run:
 
 ```bash
 streamlit run app.py
 ```
 
----
+## Tuning
 
-## Project Structure
+- **Final chunks:** how much evidence reaches the LLM.
+- **Candidate pool:** how many hybrid results enter the reranking stage.
+- **Cross-encoder reranking:** improves precision at the cost of additional local inference.
+- **Diversity / relevance:** controls MMR. Higher values favor the most relevant passages; lower values increase coverage.
+- **Minimum reranker score:** raises the relevance gate when strict retrieval is preferred.
+
+For a latency-sensitive deployment, disable the cross-encoder. For quality-focused evaluation, keep it enabled with a candidate pool around 20–40.
+
+## Project structure
 
 ```
-
-AI Support Agent/
-│
+InsightPDF/
 ├── app.py
 ├── requirements.txt
 ├── README.md
-│
-├── utils/
-│   ├── llm.py
-│   ├── pdf_loader.py
-│   ├── text_splitter.py
-│   └── vector_store.py
-│
-├── assets/
-├── data/
-└── vector_db/
-
+└── utils/
+    ├── advanced_retriever.py
+    ├── llm.py
+    ├── pdf_loader.py
+    ├── prompts.py
+    ├── text_splitter.py
+    └── vector_store.py
 ```
 
----
+`utils/vector_store.py` remains as a compatibility entry point while the implementation lives in `utils/advanced_retriever.py`.
 
-## Design Decisions
+## Why this is more than vector search
 
-A few implementation choices were made to improve both performance and usability.
+The important change is that the LLM no longer receives the nearest chunks blindly. Retrieval is treated as a ranking pipeline:
 
-### Cached Indexing
+**retrieve broadly → combine independent signals → score relevance → remove redundancy → optimize context diversity → generate**
 
-The application fingerprints uploaded documents and rebuilds the FAISS index only when the uploaded files change. This avoids recomputing embeddings on every Streamlit rerun.
-
-### Recursive Chunking
-
-Instead of splitting documents at fixed character counts, text is recursively divided by paragraphs, lines, sentences and finally words. This helps preserve semantic context.
-
-### Source Attribution
-
-Each retrieved chunk retains its page number and source document, allowing generated answers to reference where information originated.
-
-### Streaming Responses
-
-Responses are streamed token-by-token from the language model, providing faster perceived response times.
-
----
-
-## Future Improvements
-
-- OCR support for scanned PDFs
-- Hybrid keyword + vector search
-- Persistent vector database
-- User authentication
-- Conversation memory across sessions
-- Cloud deployment
-
----
-
-## Acknowledgements
-
-This project uses:
-
-- Streamlit
-- FAISS
-- Sentence Transformers
-- Groq
-- Llama 3
-- PyMuPDF
-
----
-
-## License
-
-This project is licensed under the MIT License.
+This keeps the expensive generation step focused on a smaller, higher-quality evidence set.
